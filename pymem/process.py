@@ -120,7 +120,37 @@ def inject_dll_from_path(handle:int, filepath:str):
     return module_address
 
 # To maintain compatibility with the previous version of the library
-inject_dll=inject_dll_from_ansi
+def inject_dll(handle:int, filepath:str|bytes):
+    if isinstance(filepath,bytes):
+        filepath=filepath.decode("utf-16le")
+    return inject_dll_from_path(handle, filepath)
+
+def uninject_dll(process_handle,dll_name):
+    uninject_module = pymem.process.module_from_name(process_handle, dll_name)
+    if not uninject_module:
+        return True
+    kernel32_handle = pymem.ressources.kernel32.GetModuleHandleW("kernel32.dll")
+    free_library_a_address = pymem.ressources.kernel32.GetProcAddress(kernel32_handle, b"FreeLibrary")
+
+    NULL_SECURITY_ATTRIBUTES = ctypes.cast(0, pymem.ressources.structure.LPSECURITY_ATTRIBUTES)
+    thread_h = pymem.ressources.kernel32.CreateRemoteThread(
+        process_handle,
+        NULL_SECURITY_ATTRIBUTES,
+        0,
+        free_library_a_address,
+        0,
+        uninject_module.lpBaseOfDll,
+        None
+    )
+    last_error = ctypes.windll.kernel32.GetLastError()
+    if last_error:
+        pymem.logger.warning('Got an error in free dll, code: %s' % last_error)
+    pymem.ressources.kernel32.WaitForSingleObject(thread_h, -1)
+    uninject_module = pymem.process.module_from_name(process_handle, dll_name)
+    if uninject_module:
+        return False
+    return True
+
 
 def get_luid(name):
     """Get the LUID for the SeCreateSymbolicLinkPrivilege

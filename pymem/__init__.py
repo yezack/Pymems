@@ -108,19 +108,38 @@ class Pymem(object):
 
         return addr + offsets[-1]
 
+    def uninstall_python_interperter(self):
+        raise RuntimeError("uninstall_python_interperter暂不可用")
+        python_version = "python{0}{1}.dll".format(sys.version_info.major, sys.version_info.minor)
+        python_module = pymem.process.module_from_name(self.process_handle, python_version)
+        if not python_module:
+            return True
+        kernel32_handle = pymem.ressources.kernel32.GetModuleHandleW("kernel32.dll")
+        free_library_a_address = pymem.ressources.kernel32.GetProcAddress(kernel32_handle, b"FreeLibrary")
+
+        NULL_SECURITY_ATTRIBUTES = ctypes.cast(0, pymem.ressources.structure.LPSECURITY_ATTRIBUTES)
+        thread_h = pymem.ressources.kernel32.CreateRemoteThread(
+            self.process_handle,
+            NULL_SECURITY_ATTRIBUTES,
+            0,
+            free_library_a_address,
+            0,
+            python_module.lpBaseOfDll,
+            None
+        )
+        last_error = ctypes.windll.kernel32.GetLastError()
+        if last_error:
+            pymem.logger.warning('Got an error in free dll, code: %s' % last_error)
+        pymem.ressources.kernel32.WaitForSingleObject(thread_h, -1)
+        python_module = pymem.process.module_from_name(self.process_handle, python_version)
+
     def inject_python_interpreter(self, initsigs=1):
         """Inject python interpreter into target process and call Py_InitializeEx.
         """
 
         def find_existing_interpreter(_python_version):
-            _local_handle = pymem.ressources.kernel32.GetModuleHandleW(_python_version)
             module = pymem.process.module_from_name(self.process_handle, _python_version)
-
-            self.py_run_simple_string = (
-                module.lpBaseOfDll + (
-                    pymem.ressources.kernel32.GetProcAddress(_local_handle, b'PyRun_SimpleString') - _local_handle
-                )
-            )
+            self.py_run_simple_string = self.__get_py_function_address('PyRun_SimpleString')
             self._python_injected = True
             pymem.logger.debug('PyRun_SimpleString loc: 0x%08x' % self.py_run_simple_string)
             return module.lpBaseOfDll
@@ -143,17 +162,8 @@ class Pymem(object):
             if not python_lib_h:
                 raise pymem.exception.PymemError('Inject dll failed')
 
-        local_handle = pymem.ressources.kernel32.GetModuleHandleW(python_version)
-        py_initialize_ex = (
-            python_lib_h + (
-                pymem.ressources.kernel32.GetProcAddress(local_handle, b'Py_InitializeEx') - local_handle
-            )
-        )
-        self.py_run_simple_string = (
-            python_lib_h + (
-                pymem.ressources.kernel32.GetProcAddress(local_handle, b'PyRun_SimpleString') - local_handle
-            )
-        )
+        py_initialize_ex = self.__get_py_function_address('Py_InitializeEx')
+        self.py_run_simple_string = self.__get_py_function_address('PyRun_SimpleString')
         if not py_initialize_ex:
             raise pymem.exception.PymemError('Empty py_initialize_ex')
         if not self.py_run_simple_string:
@@ -167,15 +177,17 @@ class Pymem(object):
         pymem.logger.debug('Py_InitializeEx loc: 0x%08x' % py_initialize_ex)
         pymem.logger.debug('PyRun_SimpleString loc: 0x%08x' % self.py_run_simple_string)
 
-    def inject_python_shellcode(self, shellcode):
+    def inject_python_shellcode(self, shellcode,encoding="utf-8", need_wait=True):
         """Inject a python shellcode into memory and execute it.
 
         Parameters
         ----------
         shellcode: str
-            A string with python instructions.
+		    A string with python instructions.
+		encoding: str
+        need_wait: bool
         """
-        shellcode = shellcode.encode('ascii')
+        shellcode = shellcode.encode(encoding)
         shellcode_addr = pymem.ressources.kernel32.VirtualAllocEx(
             self.process_handle,
             None,
@@ -195,9 +207,19 @@ class Pymem(object):
             ctypes.byref(written)
         )
         # check written
-        self.start_thread(self.py_run_simple_string, shellcode_addr)
+        return self.start_thread(self.py_run_simple_string, shellcode_addr, need_wait)
 
-    def start_thread(self, address, params=None):
+    def __get_py_function_address(self, function_name):
+        python_version = "python{0}{1}.dll".format(sys.version_info.major, sys.version_info.minor)
+        local_handle = pymem.ressources.kernel32.GetModuleHandleW(python_version)
+        module = pymem.process.module_from_name(self.process_handle, python_version)
+        try:
+            proc_address = pymem.ressources.kernel32.GetProcAddress(local_handle, function_name.encode("utf-8"))
+            return module.lpBaseOfDll + (proc_address - local_handle)
+        except Exception as e:
+            raise RuntimeError(e)
+
+    def start_thread(self, address, params=None, need_wait=True):
         """Create a new thread within the current debugged process.
 
         Parameters
@@ -227,7 +249,8 @@ class Pymem(object):
         last_error = ctypes.windll.kernel32.GetLastError()
         if last_error:
             pymem.logger.warning('Got an error in start thread, code: %s' % last_error)
-        pymem.ressources.kernel32.WaitForSingleObject(thread_h, -1)
+        if need_wait:
+            pymem.ressources.kernel32.WaitForSingleObject(thread_h, -1)
         pymem.logger.debug('New thread_id: 0x%08x' % thread_h)
         return thread_h
 
@@ -958,7 +981,27 @@ class Pymem(object):
             raise pymem.exception.MemoryReadError(address, struct.calcsize('d'), e.error_code)
         return value
 
-    def read_string(self, address, byte=50, encoding="UTF-8"):
+    def read_string(self, address, byte=99999, encoding="UTF-8", end_flag=b'\0'):
+        def __BytesToString(byt, decoding="utf-8"):
+            rtn_buff = byt.decode(decoding, "ignore")
+            return rtn_buff[:rtn_buff.find('\0')]
+
+        step_size = 256
+        buff = bytes()
+        address_start = address
+        while True:
+            tmp_buff = self.read_bytes(address_start, step_size)
+            if tmp_buff:
+                buff += tmp_buff
+                str_end = buff.find(end_flag)
+            else:
+                str_end = -1
+            if str_end >= 0 or (byte and len(buff) > byte) or not tmp_buff:
+                return __BytesToString(buff[0:str_end + 2], encoding)
+            else:
+                address_start += step_size
+
+    def __read_string(self, address, byte=50, encoding="UTF-8"):
         """Reads n `byte` from an area of memory in a specified process.
 
         Parameters
@@ -1446,3 +1489,5 @@ class Pymem(object):
             pymem.memory.write_uchar(self.process_handle, address, value)
         except pymem.exception.WinAPIError as e:
             raise pymem.exception.MemoryWriteError(address, value, e.error_code)
+
+from pymem.__pymems import Pymems
