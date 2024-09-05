@@ -1,4 +1,4 @@
-import mmap,json,os
+import mmap, json, os, time
 import ctypes
 from ctypes import wintypes
 from pymem import *
@@ -7,6 +7,8 @@ EnumWindows = ctypes.windll.user32.EnumWindows
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 GetWindowThreadProcessId = ctypes.windll.user32.GetWindowThreadProcessId
 GetParent = ctypes.windll.user32.GetParent
+OpenSemaphoreW = ctypes.windll.kernel32.OpenSemaphoreW
+
 
 class Pymems(Pymem):
     def __init__(
@@ -19,10 +21,11 @@ class Pymems(Pymem):
         self.__remote_shell_addr = None
         super().__init__(process_name, exact_match, ignore_case)
         tg = f"pymems_mulit_link_lock_{self.process_id}"
-        dt=self.__getMmapData(tg)
+        dt = self.__getMmapData(tg)
         if dt:
             if not multi_link:
-                raise RuntimeError(f"进程[{self.process_id}]已被[{dt.decode('utf-8')}]连接,multi_link参数未启用不允许重复连接。")
+                raise RuntimeError(
+                    f"进程[{self.process_id}]已被[{dt.decode('utf-8')}]连接,multi_link参数未启用不允许重复连接。")
             else:
                 print(f"进程[{self.process_id}]已被[{dt.decode('utf-8')}]连接,multi_link参数已启用允许重复连接。")
 
@@ -30,9 +33,10 @@ class Pymems(Pymem):
         self.__mmap_content.seek(0)
         self.__mmap_content.write(str(os.getpid()).encode('utf-8'))
         self.__mmap_content.flush()
+        self.__exec_mmap_semaphore = OpenSemaphoreW(0x00100000, False,
+                                                    f"Global\\pymems_exec_mmap_semaphore_{self.process_id}")
 
-
-    def remote_exec(self, code:str, return_var_name=None):
+    def remote_exec(self, code: str, return_var_name=None, by_CreateRemoteThread=False):
         if not self._python_injected:
             raise RuntimeError("请先执行pymems.inject_python_interpreter")
         if not self.__remote_shell_addr:
@@ -55,7 +59,22 @@ class Pymems(Pymem):
             len(code_b),
             ctypes.byref(written)
         )
-        self.start_thread(self.__remote_shell_addr, code_addr)
+        if by_CreateRemoteThread:
+            self.start_thread(self.__remote_shell_addr, code_addr)
+        else:
+            size_mm = ctypes.sizeof(ctypes.c_void_p)
+            code_addr_b = code_addr.to_bytes(ctypes.sizeof(ctypes.c_void_p), byteorder="little")
+            mm = mmap.mmap(-1, size_mm, tagname=f"pymems_exec_ptr_{self.process_id}", access=mmap.ACCESS_WRITE)
+            ctypes.windll.kernel32.WaitForSingleObject(self.__exec_mmap_semaphore, -1)
+            mm.seek(0)
+            mm.write(code_addr_b)
+            mm.flush()
+            ctypes.windll.kernel32.ReleaseSemaphore(self.__exec_mmap_semaphore, 1, None)
+            mm.close()
+            st = time.time()
+            while not int.from_bytes(self.read_bytes(result_addr, size_mm),byteorder="little") and time.time() - st < 1:
+                time.sleep(0.001)
+
         result_b_addr = int.from_bytes(self.read_bytes(result_addr, ctypes.sizeof(ctypes.c_void_p)), byteorder="little")
         self.free(result_addr)
         if result_b_addr:
@@ -67,13 +86,15 @@ class Pymems(Pymem):
             else:
                 print(f"执行代码错误:" + str(result_j["message"]))
                 return None
+        else:
+            print("result_b_addr未能获取到")
         pass
 
     def inject_python_shellcode(self, shellcode, need_wait=True):
         raise AttributeError("pymems.inject_python_shellcode不可访问,使用pymems.remote_exec执行代码")
 
     def inject_python_remote_sheller(self):
-        tag=f"pymems_remote_inject_info_{self.process_id}"
+        tag = f"pymems_remote_inject_info_{self.process_id}"
         dt_bytes = self.__getMmapData(tag)
         if not dt_bytes:
             print(f"未获取到[{tag}],重新注入代码.")
@@ -100,17 +121,18 @@ class Pymems(Pymem):
 
     def get_window_hwnds(self):
         hwnds = []
-        pid=self.process_id
+        pid = self.process_id
+
         def __enum_windows_proc(hwnd, lParam):
             window_pid = wintypes.DWORD()
             GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
-            if window_pid.value == pid and GetParent(hwnd)==0:
+            if window_pid.value == pid and GetParent(hwnd) == 0:
                 hwnds.append(hwnd)
             return True
+
         EnumWindows(EnumWindowsProc(__enum_windows_proc), 0)
         return hwnds
-    
-    def get_window_hwnd(self):
-        hwnds=self.get_window_hwnds()
-        return hwnds[0] if hwnds else None
 
+    def get_window_hwnd(self):
+        hwnds = self.get_window_hwnds()
+        return hwnds[0] if hwnds else None

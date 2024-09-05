@@ -5,10 +5,20 @@ def pymems_remote_call_init_temp_function():
     OutputDebugStringW = ctypes.windll.kernel32.OutputDebugStringW
     OutputDebugStringW.argtypes = [wintypes.LPCWSTR]
     OutputDebugStringW.restype = None
+    exec_mmap_semaphore = kernel32.OpenSemaphoreW(0x00100000, False, f"Global\\pymems_exec_mmap_semaphore_{os.getpid()}")
     def __debug_print(s):
-        OutputDebugStringW(str(s))
+        OutputDebugStringW("pymems."+str(s))
     exec_local_name_space = {"exit_flag": None}
 
+    def __get_exec_by_mmap(mm):
+        kernel32.WaitForSingleObject(exec_mmap_semaphore, -1)
+        mm.seek(0)
+        mm_dt=mm.read(1024).rstrip(b'\x00')
+        mm.seek(0)
+        mm.write(b'\x00'*len(mm_dt))
+        mm.flush()
+        kernel32.ReleaseSemaphore(exec_mmap_semaphore, 1, None)
+        return mm_dt
     try:
         OpenProcess = kernel32.OpenProcess
         OpenProcess.restype = ctypes.c_void_p
@@ -55,6 +65,7 @@ def pymems_remote_call_init_temp_function():
             return_var_name = code_obj.get("return_var_name", None)
             result_addr = code_obj.get("result_addr", None)
             code = code_obj["code"]
+            __debug_print(f"code:{code}")
             try:
                 exec_local_name_space[return_var_name] = None
                 exec(code, exec_local_name_space)
@@ -76,8 +87,7 @@ def pymems_remote_call_init_temp_function():
                 return_b = json.dumps(r).encode("utf-8") + b'\0\0'
                 return_b_addr = VirtualAlloc(None, len(return_b), 0x3000, 0x40)
                 WriteProcessMemory(-1, return_b_addr, return_b, len(return_b), None)
-                WriteProcessMemory(-1, result_addr, struct.pack("P", return_b_addr), ctypes.sizeof(ctypes.c_void_p),
-                                   None)
+                WriteProcessMemory(-1, result_addr, struct.pack("P", return_b_addr), ctypes.sizeof(ctypes.c_void_p),None)
                 #__debug_print(f"运行结果存储在: " + str(return_b_addr))
             except Exception as e:
                 error_msg = traceback.format_exc()
@@ -89,15 +99,23 @@ def pymems_remote_call_init_temp_function():
         remote_call_ptr = ctypes.cast(__remote_call_back, ctypes.c_void_p).value
 
         tg = f"pymems_remote_inject_info_{os.getpid()}"
-        m = mmap.mmap(-1, 1024, tagname=tg, access=mmap.ACCESS_WRITE)
-        m.seek(0)
+        mmap_remote_call = mmap.mmap(-1, 1024, tagname=tg, access=mmap.ACCESS_WRITE)
+        mmap_remote_call.seek(0)
         dt =json.dumps({"remote_call_ptr": remote_call_ptr})
-        m.write(dt.encode('utf-8'))
-        m.flush()
+        mmap_remote_call.write(dt.encode('utf-8'))
+        mmap_remote_call.flush()
         __debug_print(f"已设定[{tg}]>>{dt}")
+        mmap_remote_exec= mmap.mmap(-1, ctypes.sizeof(ctypes.c_void_p), tagname=f"pymems_exec_ptr_{os.getpid()}", access=mmap.ACCESS_WRITE)
         while exec_local_name_space.get("exit_flag") != 0x258EAFA5:
-            time.sleep(0.01)
-        m.close()
+            code_addr_b= __get_exec_by_mmap(mmap_remote_exec)
+            if code_addr_b:
+                code_addr=int.from_bytes(code_addr_b,byteorder="little")
+                __remote_call(code_addr)
+            else:
+                time.sleep(0.0001)
+
+        mmap_remote_call.close()
+        mmap_remote_call_reflect.close()
         __debug_print("我退出了(exit_flag主动)")
 
     except Exception as e:
