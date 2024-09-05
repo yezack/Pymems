@@ -114,9 +114,8 @@ def pymems_remote_call_init_temp_function():
                 __remote_call(code_addr)
             else:
                 time.sleep(0.0001)
-
+        mmap_remote_exec.close()
         mmap_remote_call.close()
-        mmap_remote_call_reflect.close()
         __debug_print("我退出了(exit_flag主动)")
 
     except Exception as e:
