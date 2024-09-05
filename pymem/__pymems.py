@@ -36,7 +36,7 @@ class Pymems(Pymem):
         self.__exec_mmap_semaphore = OpenSemaphoreW(0x00100000, False,
                                                     f"Global\\pymems_exec_mmap_semaphore_{self.process_id}")
 
-    def remote_exec(self, code: str, return_var_name=None, by_CreateRemoteThread=False):
+    def remote_exec(self, code: str, return_var_name=None, in_global=False,by_CreateRemoteThread=False):
         if not self._python_injected:
             raise RuntimeError("请先执行pymems.inject_python_interpreter")
         if not self.__remote_shell_addr:
@@ -47,7 +47,8 @@ class Pymems(Pymem):
         code_obj = {
             "return_var_name": return_var_name,
             "result_addr": result_addr,
-            "code": code
+            "code": code,
+            "in_global": in_global
         }
         code_b = json.dumps(code_obj).encode('utf-8') + b'\0\0'
         code_addr = self.allocate(len(code_b))

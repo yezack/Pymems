@@ -64,14 +64,22 @@ def pymems_remote_call_init_temp_function():
             code_obj = json.loads(ctypes.string_at(arg).decode("utf-8"))
             return_var_name = code_obj.get("return_var_name", None)
             result_addr = code_obj.get("result_addr", None)
+            in_global = code_obj.get("in_global", False)
             code = code_obj["code"]
-            __debug_print(f"code:{code}")
             try:
-                exec_local_name_space[return_var_name] = None
-                exec(code, exec_local_name_space)
+                if in_global:
+                    if return_var_name and return_var_name in exec_local_name_space:
+                        del exec_local_name_space[return_var_name]
+                    exec(code, exec_local_name_space)
+                    if return_var_name:
+                        r = {"error": 0, "result": exec_local_name_space.get(return_var_name, None)}
+                else:
+                    exec_local_temp = {}
+                    exec(code, exec_local_name_space, exec_local_temp)
+                    if return_var_name:
+                        r = {"error": 0, "result": exec_local_temp.get(return_var_name, None)}
                 if return_var_name:
-                    r = {"error": 0, "result": exec_local_name_space.get(return_var_name, None)}
-                    #__debug_print(f"执行结果:{return_var_name}=" + str(r))
+                    #__debug_print(f"执行结果:{return_var_name}=" + repr(r))
                     try:
                         json.dumps(r["result"])
                     except (TypeError, OverflowError):
@@ -87,7 +95,8 @@ def pymems_remote_call_init_temp_function():
                 return_b = json.dumps(r).encode("utf-8") + b'\0\0'
                 return_b_addr = VirtualAlloc(None, len(return_b), 0x3000, 0x40)
                 WriteProcessMemory(-1, return_b_addr, return_b, len(return_b), None)
-                WriteProcessMemory(-1, result_addr, struct.pack("P", return_b_addr), ctypes.sizeof(ctypes.c_void_p),None)
+                WriteProcessMemory(-1, result_addr, struct.pack("P", return_b_addr), ctypes.sizeof(ctypes.c_void_p),
+                                   None)
                 #__debug_print(f"运行结果存储在: " + str(return_b_addr))
             except Exception as e:
                 error_msg = traceback.format_exc()
