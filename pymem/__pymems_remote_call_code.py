@@ -10,12 +10,12 @@ def pymems_remote_call_init_temp_function():
         OutputDebugStringW("pymems."+str(s))
     exec_local_name_space = {"exit_flag": None}
 
-    def __get_exec_by_mmap(mm):
+    def __get_exec_by_mmap(mm,mm_length):
         kernel32.WaitForSingleObject(exec_mmap_semaphore, -1)
         mm.seek(0)
-        mm_dt=mm.read(1024).rstrip(b'\x00')
+        mm_dt=mm.read(mm_length)
         mm.seek(0)
-        mm.write(b'\x00'*len(mm_dt))
+        mm.write(b'\0'*len(mm_dt))
         mm.flush()
         kernel32.ReleaseSemaphore(exec_mmap_semaphore, 1, None)
         return mm_dt
@@ -105,9 +105,10 @@ def pymems_remote_call_init_temp_function():
         mmap_remote_call.write(dt.encode('utf-8'))
         mmap_remote_call.flush()
         __debug_print(f"已设定[{tg}]>>{dt}")
-        mmap_remote_exec= mmap.mmap(-1, ctypes.sizeof(ctypes.c_void_p), tagname=f"pymems_exec_ptr_{os.getpid()}", access=mmap.ACCESS_WRITE)
+        mmap_remote_exec_length=ctypes.sizeof(ctypes.c_void_p)
+        mmap_remote_exec= mmap.mmap(-1,mmap_remote_exec_length, tagname=f"pymems_exec_ptr_{os.getpid()}", access=mmap.ACCESS_WRITE)
         while exec_local_name_space.get("exit_flag") != 0x258EAFA5:
-            code_addr_b= __get_exec_by_mmap(mmap_remote_exec)
+            code_addr_b= __get_exec_by_mmap(mmap_remote_exec,mmap_remote_exec_length)
             if code_addr_b:
                 code_addr=int.from_bytes(code_addr_b,byteorder="little")
                 __remote_call(code_addr)
